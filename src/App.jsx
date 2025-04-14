@@ -3,87 +3,141 @@ import { encode } from "@jsquash/avif";
 import "./App.css";
 
 function App() {
-  const [inputFile, setInputFile] = useState(null);
-  const [originalDimensions, setOriginalDimensions] = useState(null);
+  // --- State for multiple files ---
+  const [inputFiles, setInputFiles] = useState([]); // Array of File objects
+  const [originalDimensionsList, setOriginalDimensionsList] = useState([]); // Array of {width, height}
+  const [imageUrlList, setImageUrlList] = useState([]); // Array of preview URLs
+  const [loadedImages, setLoadedImages] = useState([]); // Array of loaded Image objects
+  // --- State for single file or batch settings ---
   const [targetWidth, setTargetWidth] = useState("");
   const [targetHeight, setTargetHeight] = useState("");
   const [quality, setQuality] = useState(75); // Default quality percentage
-  const [imageUrl, setImageUrl] = useState(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [error, setError] = useState("");
 
   const outputCanvasRef = useRef(null);
-  const imageRef = useRef(null); // To hold the Image object for drawing
 
-  // Clean up ObjectURL
+  // Clean up ObjectURLs for previews
   useEffect(() => {
     return () => {
-      if (imageUrl) {
-        URL.revokeObjectURL(imageUrl);
-      }
+      imageUrlList.forEach((url) => {
+        if (url && url.startsWith("blob:")) {
+          URL.revokeObjectURL(url);
+        }
+      });
     };
-  }, [imageUrl]);
+  }, [imageUrlList]); // Depend on the list
 
   const handleFileChange = (event) => {
-    const file = event.target.files[0];
+    const files = event.target.files; // FileList
     setError("");
-    setOriginalDimensions(null);
-    setTargetWidth("");
+    setTargetWidth(""); // Reset target dims
     setTargetHeight("");
-    imageRef.current = null;
+    // Reset all lists
+    setInputFiles([]);
+    setOriginalDimensionsList([]);
+    setImageUrlList([]);
+    setLoadedImages([]);
 
-    // Revoke previous object URL if one exists
-    if (imageUrl && imageUrl.startsWith("blob:")) {
-      URL.revokeObjectURL(imageUrl);
+    // --- Cleanup previous preview URLs ---
+    imageUrlList.forEach((url) => {
+      if (url && url.startsWith("blob:")) {
+        URL.revokeObjectURL(url);
+      }
+    });
+
+    if (!files || files.length === 0) {
+      // Reset file input value if selection was cancelled
+      event.target.value = null;
+      return; // Nothing selected
     }
-    setImageUrl(null); // Reset image URL state
 
-    if (file && file.type.startsWith("image/")) {
-      setInputFile(file);
-      const reader = new FileReader();
+    const validImageFiles = Array.from(files).filter((file) =>
+      file.type.startsWith("image/")
+    );
 
-      reader.onload = (e) => {
-        const dataUrl = e.target.result; // Use Data URL initially
-        setImageUrl(dataUrl); // Set preview URL
+    if (validImageFiles.length === 0) {
+      setError(
+        "No valid image files selected. Please select PNG, JPG, GIF, WEBP, etc."
+      );
+      event.target.value = null; // Reset input
+      return;
+    }
 
-        const img = new Image();
-        img.onload = () => {
-          imageRef.current = img; // Store the loaded image object
-          const dimensions = {
-            width: img.naturalWidth,
-            height: img.naturalHeight,
+    setInputFiles(validImageFiles); // Store the valid files
+
+    // Process each file
+    const promises = validImageFiles.map((file) => {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          const dataUrl = e.target.result;
+          const img = new Image();
+          img.onload = () => {
+            resolve({
+              img,
+              dimensions: {
+                width: img.naturalWidth,
+                height: img.naturalHeight,
+              },
+              url: dataUrl, // Use Data URL for preview consistency initially
+              file: file, // Keep track of the original file for filename later
+            });
           };
-          setOriginalDimensions(dimensions);
-          setTargetWidth(dimensions.width.toString());
-          setTargetHeight(dimensions.height.toString());
+          img.onerror = () => {
+            console.error("Failed to load image:", file.name);
+            // Resolve with null to indicate failure for this specific image
+            resolve(null);
+          };
+          img.src = dataUrl;
         };
-        img.onerror = () => {
-          setError(
-            "Failed to load image dimensions. The file might be corrupt or an unsupported format."
-          );
-          setImageUrl(null); // Clear preview on error
-          setInputFile(null);
+        reader.onerror = () => {
+          console.error("Failed to read file:", file.name);
+          // Resolve with null to indicate failure for this specific image
+          resolve(null);
         };
-        img.src = dataUrl;
-      };
-      reader.onerror = () => {
-        setError("Failed to read file.");
-        setInputFile(null);
-      };
-      reader.readAsDataURL(file); // Read as Data URL for direct use in Image src
-    } else {
-      setInputFile(null);
-      if (file) {
-        // Only show error if a file was actually selected
+        reader.readAsDataURL(file);
+      });
+    });
+
+    // Wait for all files to be processed
+    Promise.all(promises).then((results) => {
+      const successfulResults = results.filter((r) => r !== null);
+
+      if (successfulResults.length === 0 && validImageFiles.length > 0) {
         setError(
-          "Please select a valid image file (e.g., PNG, JPG, GIF, WEBP)."
+          "Failed to load any of the selected images. They might be corrupt or unsupported."
+        );
+      } else if (successfulResults.length < validImageFiles.length) {
+        setError(
+          `Warning: Failed to load ${
+            validImageFiles.length - successfulResults.length
+          } image(s). Processing the rest.`
         );
       }
-    }
-    // Reset file input value so selecting the same file again triggers onChange
+
+      // Update state with successfully loaded images
+      setLoadedImages(successfulResults.map((r) => r.img));
+      setOriginalDimensionsList(successfulResults.map((r) => r.dimensions));
+      setImageUrlList(successfulResults.map((r) => r.url));
+
+      // **Crucially: If only ONE image was successfully loaded, set target dimensions**
+      if (successfulResults.length === 1) {
+        const { width, height } = successfulResults[0].dimensions;
+        setTargetWidth(width.toString());
+        setTargetHeight(height.toString());
+      }
+
+      // Keep the original valid files list (even if some failed to load img data)
+      // This ensures the UI reflects the selection count correctly
+      setInputFiles(successfulResults.map((r) => r.file));
+    });
+
+    // Reset file input value so selecting the same file(s) again triggers onChange
     event.target.value = null;
   };
 
+  // Dimension change handlers remain the same, only used for single image mode
   const handleDimensionChange = (value, type) => {
     const numValue = value.replace(/\D/g, ""); // Allow only digits
     if (type === "width") {
@@ -93,16 +147,19 @@ function App() {
     }
   };
 
+  // Ratio click handler remains the same, only used for single image mode
   const handleRatioClick = (divisor) => {
-    if (originalDimensions) {
+    // Ensure we're in single image mode
+    if (inputFiles.length === 1 && originalDimensionsList.length === 1) {
+      const originalDimensions = originalDimensionsList[0];
       const newWidth = Math.max(
         1,
         Math.round(originalDimensions.width / divisor)
-      ); // Ensure minimum 1px
+      );
       const newHeight = Math.max(
         1,
         Math.round(originalDimensions.height / divisor)
-      ); // Ensure minimum 1px
+      );
       setTargetWidth(newWidth.toString());
       setTargetHeight(newHeight.toString());
     }
@@ -112,165 +169,186 @@ function App() {
     setQuality(parseInt(event.target.value, 10));
   };
 
-  // Use useCallback to memoize the canvas drawing function
-  const drawCanvas = useCallback((img, canvas, tWidth, tHeight) => {
-    const ctx = canvas.getContext("2d");
-    if (!ctx || !img) return null;
+  // The specialized drawCanvas function for resizing WITH background blur
+  // Only used when inputFiles.length === 1
+  const drawResizedCanvasWithBackground = useCallback(
+    (img, canvas, tWidth, tHeight) => {
+      const ctx = canvas.getContext("2d");
+      if (!ctx || !img) return null;
 
-    // Ensure dimensions are positive integers
-    tWidth = Math.max(1, Math.round(tWidth));
-    tHeight = Math.max(1, Math.round(tHeight));
+      // Ensure dimensions are positive integers
+      tWidth = Math.max(1, Math.round(tWidth));
+      tHeight = Math.max(1, Math.round(tHeight));
 
-    const oWidth = img.naturalWidth;
-    const oHeight = img.naturalHeight;
+      const oWidth = img.naturalWidth;
+      const oHeight = img.naturalHeight;
 
-    canvas.width = tWidth;
-    canvas.height = tHeight;
+      canvas.width = tWidth;
+      canvas.height = tHeight;
+      ctx.clearRect(0, 0, tWidth, tHeight); // Clear canvas
 
-    // --- Background Blur ---
-    // Calculate scale to cover the canvas while maintaining aspect ratio
-    const coverScale = Math.max(tWidth / oWidth, tHeight / oHeight);
-    const coverWidth = oWidth * coverScale;
-    const coverHeight = oHeight * coverScale;
-    const coverX = (tWidth - coverWidth) / 2;
-    const coverY = (tHeight - coverHeight) / 2;
+      // --- Background Blur ---
+      const coverScale = Math.max(tWidth / oWidth, tHeight / oHeight);
+      const coverWidth = oWidth * coverScale;
+      const coverHeight = oHeight * coverScale;
+      const coverX = (tWidth - coverWidth) / 2;
+      const coverY = (tHeight - coverHeight) / 2;
 
-    // Apply blur filter
-    ctx.filter = "blur(15px) brightness(0.9)"; // Adjust blur amount and brightness as needed
-    ctx.imageSmoothingEnabled = true; // Enable smoothing for better blur quality
-    ctx.imageSmoothingQuality = "high";
+      ctx.filter = "blur(15px) brightness(0.9)";
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
+      ctx.drawImage(img, coverX, coverY, coverWidth, coverHeight);
+      // Optional: Draw canvas onto itself might help edge blur consistency
+      // ctx.drawImage(canvas, 0, 0);
 
-    // Draw the image scaled to cover the canvas
-    ctx.drawImage(img, coverX, coverY, coverWidth, coverHeight);
+      ctx.filter = "none";
+      ctx.imageSmoothingEnabled = false; // Usually false for crisp foreground
 
-    // Draw the blurred image onto itself to ensure edge pixels are blurred correctly
-    // This can sometimes help with edge artifacts depending on browser implementation
-    ctx.drawImage(canvas, 0, 0);
+      // --- Foreground Centered Image ---
+      const fitScale = Math.min(tWidth / oWidth, tHeight / oHeight);
+      const scaledWidth = oWidth * fitScale;
+      const scaledHeight = oHeight * fitScale;
+      const x = (tWidth - scaledWidth) / 2;
+      const y = (tHeight - scaledHeight) / 2;
 
-    // Reset filter and smoothing for the main image
-    ctx.filter = "none";
-    ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(img, x, y, scaledWidth, scaledHeight);
 
-    // --- Foreground Centered Image ---
-    // Calculate scale to fit the image within the canvas while maintaining aspect ratio
-    const fitScale = Math.min(tWidth / oWidth, tHeight / oHeight);
-    const scaledWidth = oWidth * fitScale;
-    const scaledHeight = oHeight * fitScale;
-    const x = (tWidth - scaledWidth) / 2;
-    const y = (tHeight - scaledHeight) / 2;
-
-    // Draw the original image, centered and scaled to fit
-    ctx.drawImage(img, x, y, scaledWidth, scaledHeight);
-
-    return ctx; // Return the context, although we mostly need the canvas data later
-  }, []); // No dependencies needed if it only uses its arguments
+      return ctx;
+    },
+    []
+  );
 
   const handleDownload = async () => {
     if (
-      !inputFile ||
-      !imageRef.current ||
+      inputFiles.length === 0 ||
+      loadedImages.length !== inputFiles.length || // Ensure all selected files are loaded as images
       !outputCanvasRef.current ||
       isProcessing
     ) {
-      setError("Upload an image and set dimensions first.");
+      setError("Upload image(s) first, and wait for previews to load.");
       return;
     }
 
-    const currentTargetWidth = parseInt(targetWidth, 10);
-    const currentTargetHeight = parseInt(targetHeight, 10);
-
-    if (
-      isNaN(currentTargetWidth) ||
-      isNaN(currentTargetHeight) ||
-      currentTargetWidth <= 0 ||
-      currentTargetHeight <= 0
-    ) {
-      setError(
-        "Invalid target dimensions. Width and height must be positive numbers."
-      );
+    const canvas = outputCanvasRef.current;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      setError("Failed to get canvas context.");
       return;
+    }
+
+    const isSingleImageMode = inputFiles.length === 1;
+    let currentTargetWidth = 0;
+    let currentTargetHeight = 0;
+
+    // Validate dimensions ONLY if in single image mode
+    if (isSingleImageMode) {
+      currentTargetWidth = parseInt(targetWidth, 10);
+      currentTargetHeight = parseInt(targetHeight, 10);
+      if (
+        isNaN(currentTargetWidth) ||
+        isNaN(currentTargetHeight) ||
+        currentTargetWidth <= 0 ||
+        currentTargetHeight <= 0
+      ) {
+        setError(
+          "Invalid target dimensions. Width and height must be positive numbers."
+        );
+        return;
+      }
     }
 
     setError("");
     setIsProcessing(true);
 
+    // Map slider quality (0-100) to AVIF cqLevel (0-63, lower is better quality)
+    const cqLevel = Math.max(
+      0,
+      Math.min(63, Math.round(63 - (quality / 100) * 53))
+    ); // Clamp CQ level
+
+    console.log(
+      `Encoding AVIF with Quality: ${quality}% -> CQ Level: ${cqLevel}`
+    );
+
     try {
-      const canvas = outputCanvasRef.current;
-      const img = imageRef.current;
+      // Process each image sequentially to avoid overwhelming resources
+      for (let i = 0; i < loadedImages.length; i++) {
+        const img = loadedImages[i];
+        const file = inputFiles[i]; // Get the original file for naming
 
-      // Ensure the image object is ready
-      if (!img.complete || img.naturalWidth === 0) {
-        // Attempt to wait a short moment if not complete, might help race conditions
-        await new Promise((resolve) => setTimeout(resolve, 100));
+        // Ensure the image object is ready (might be redundant due to load check above, but safe)
         if (!img.complete || img.naturalWidth === 0) {
-          throw new Error("Image data is not available for processing.");
+          console.warn(
+            `Image data for ${file.name} not fully available, skipping.`
+          );
+          continue; // Skip this image
         }
-      }
 
-      // Draw the image onto the canvas with background blur/padding
-      const ctx = drawCanvas(
-        img,
-        canvas,
-        currentTargetWidth,
-        currentTargetHeight
-      );
+        let imageData;
 
-      if (!ctx) {
-        throw new Error("Failed to get canvas 2D context.");
-      }
+        // --- Drawing Logic ---
+        if (isSingleImageMode) {
+          // Use the specialized resizing function for single images
+          const drawCtx = drawResizedCanvasWithBackground(
+            img,
+            canvas,
+            currentTargetWidth,
+            currentTargetHeight
+          );
+          if (!drawCtx)
+            throw new Error(`Failed to draw canvas for ${file.name}`);
+          imageData = drawCtx.getImageData(0, 0, canvas.width, canvas.height);
+        } else {
+          // Batch mode: Use original dimensions, no resizing/padding effect
+          canvas.width = img.naturalWidth;
+          canvas.height = img.naturalHeight;
+          ctx.clearRect(0, 0, canvas.width, canvas.height); // Clear before drawing
+          ctx.drawImage(img, 0, 0);
+          imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        }
 
-      // Get ImageData from the canvas
-      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        // --- Encoding ---
+        const avifBuffer = await encode(imageData, {
+          cqLevel: cqLevel,
+          speed: 6, // Balance speed and compression
+        });
 
-      // Map slider quality (0-100) to AVIF cqLevel (0-63, lower is better quality)
-      // This is a common but adjustable mapping. 100 = minimal compression, 0 = max compression.
-      // Lower cqLevel means higher quality and larger file size.
-      // Let's map 100 -> 10, 75 -> ~25, 50 -> ~40, 25 -> ~52, 0 -> 63
-      const cqLevel = Math.round(63 - (quality / 100) * 53); // Maps 0-100 roughly to 63-10
+        if (!avifBuffer) {
+          console.warn(
+            `AVIF encoding returned empty buffer for ${file.name}, skipping.`
+          );
+          continue; // Skip this image
+        }
 
-      console.log(
-        `Encoding AVIF with Quality: ${quality}% -> CQ Level: ${cqLevel}`
-      );
+        // --- Downloading ---
+        const blob = new Blob([avifBuffer], { type: "image/avif" });
+        const downloadUrl = URL.createObjectURL(blob);
 
-      // Encode the ImageData to AVIF
-      const avifBuffer = await encode(imageData, {
-        cqLevel: Math.max(0, Math.min(63, cqLevel)), // Clamp CQ level to valid range 0-63
-        // Speed determines encoding effort (0=slowest/best compression, 10=fastest/worst compression)
-        // Speed 6 is often a good balance for client-side web use.
-        speed: 6,
-        // You can add other options like `subsample` (chroma subsampling) if needed
-        // subsample: 1 // (4:4:4 - no chroma subsampling)
-        // subsample: 2 // (4:2:0 - default, good compression)
-      });
+        const link = document.createElement("a");
+        link.href = downloadUrl;
+        const originalFileName =
+          file.name.substring(0, file.name.lastIndexOf(".")) || file.name;
 
-      if (!avifBuffer) {
-        throw new Error("AVIF encoding returned empty buffer.");
-      }
+        // Use target dimensions in filename only for single mode
+        const dimensionsString = isSingleImageMode
+          ? `${currentTargetWidth}x${currentTargetHeight}`
+          : `${img.naturalWidth}x${img.naturalHeight}`;
 
-      // Create a Blob and download link
-      const blob = new Blob([avifBuffer], { type: "image/avif" });
-      const downloadUrl = URL.createObjectURL(blob);
+        link.download = `${originalFileName}_${dimensionsString}_q${quality}.avif`;
 
-      const link = document.createElement("a");
-      link.href = downloadUrl;
-      // Create a filename
-      const originalFileName =
-        inputFile.name.substring(0, inputFile.name.lastIndexOf(".")) ||
-        inputFile.name;
-      link.download = `${originalFileName}_${currentTargetWidth}x${currentTargetHeight}_q${quality}.avif`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(downloadUrl); // Clean up immediately after click
 
-      // Trigger download
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-
-      // Clean up the Blob URL
-      URL.revokeObjectURL(downloadUrl);
+        // Optional: Add a small delay between downloads for stability in some browsers
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      } // End of loop
     } catch (err) {
-      console.error("Encoding or Download failed:", err);
+      console.error("Processing or Download failed:", err);
       setError(
         `Error: ${
-          err.message || "AVIF encoding failed. Check console for details."
+          err.message || "AVIF encoding/download failed. Check console."
         }`
       );
     } finally {
@@ -278,101 +356,133 @@ function App() {
     }
   };
 
+  // Determine if dimension controls should be shown
+  const showDimensionControls =
+    inputFiles.length === 1 && originalDimensionsList.length === 1;
+
   return (
     <div className="App">
       <h1>Any Image to AVIF Converter</h1>
+      <p
+        style={{
+          color: "var(--text-muted-color)",
+          marginTop: "-1.5rem",
+          marginBottom: "2rem",
+        }}
+      >
+        Upload one or multiple images (PNG, JPG, WEBP, etc.). Resize single
+        images or batch compress multiple images.
+      </p>
 
       <div className="control-section upload-section">
         <label htmlFor="file-upload" className="custom-file-upload">
-          {inputFile ? `Selected: ${inputFile.name}` : "1. Upload Image"}
+          {inputFiles.length === 0
+            ? "1. Upload Image(s)"
+            : `Selected: ${inputFiles.length} image(s)`}
         </label>
         <input
           id="file-upload"
           type="file"
           onChange={handleFileChange}
-          accept="image/png, image/jpeg, image/gif, image/webp, image/bmp" // Be specific or use image/*
+          accept="image/png, image/jpeg, image/gif, image/webp, image/bmp"
           disabled={isProcessing}
+          multiple // <-- Allow multiple file selection
         />
       </div>
 
       {error && <p className="error-message">{error}</p>}
 
-      {/* Only show controls and preview when an image is successfully loaded */}
-      {originalDimensions && imageUrl && (
+      {/* Only show controls and preview when images are successfully loaded */}
+      {inputFiles.length > 0 && (
         <div className="controls-and-preview">
           <div className="controls">
-            <h2>2. Adjust Settings</h2>
-            <div className="dimension-info">
-              Original: {originalDimensions.width} x {originalDimensions.height}{" "}
-              px
-            </div>
+            <h2>
+              {showDimensionControls ? "2. Adjust Settings" : "2. Set Quality"}
+            </h2>
 
-            <div className="dimension-inputs">
-              <label>
-                Target Width:
-                <input
-                  type="number"
-                  value={targetWidth}
-                  onChange={(e) =>
-                    handleDimensionChange(e.target.value, "width")
-                  }
-                  disabled={isProcessing}
-                  min="1"
-                  step="1"
-                  placeholder="Width"
-                />{" "}
-                px
-              </label>
-              <label>
-                Target Height:
-                <input
-                  type="number"
-                  value={targetHeight}
-                  onChange={(e) =>
-                    handleDimensionChange(e.target.value, "height")
-                  }
-                  disabled={isProcessing}
-                  min="1"
-                  step="1"
-                  placeholder="Height"
-                />{" "}
-                px
-              </label>
-            </div>
+            {/* --- Dimension Controls: Only for single image --- */}
+            {showDimensionControls && (
+              <>
+                <div className="dimension-info">
+                  Original: {originalDimensionsList[0]?.width} x{" "}
+                  {originalDimensionsList[0]?.height} px
+                </div>
 
-            <div className="ratio-buttons">
-              <span>Resize proportionally:</span>
-              <button
-                onClick={() => handleRatioClick(2)}
-                disabled={isProcessing || !originalDimensions}
-              >
-                / 2
-              </button>
-              <button
-                onClick={() => handleRatioClick(4)}
-                disabled={isProcessing || !originalDimensions}
-              >
-                / 4
-              </button>
-              <button
-                onClick={() => handleRatioClick(6)}
-                disabled={isProcessing || !originalDimensions}
-              >
-                / 6
-              </button>
-            </div>
-            <p className="info-text">
-              Note: If target aspect ratio differs, image will be centered with
-              a blurred background fill.
-            </p>
+                <div className="dimension-inputs">
+                  <label>
+                    Target Width:
+                    <input
+                      type="number"
+                      value={targetWidth}
+                      onChange={(e) =>
+                        handleDimensionChange(e.target.value, "width")
+                      }
+                      disabled={isProcessing}
+                      min="1"
+                      step="1"
+                      placeholder="Width"
+                    />{" "}
+                    px
+                  </label>
+                  <label>
+                    Target Height:
+                    <input
+                      type="number"
+                      value={targetHeight}
+                      onChange={(e) =>
+                        handleDimensionChange(e.target.value, "height")
+                      }
+                      disabled={isProcessing}
+                      min="1"
+                      step="1"
+                      placeholder="Height"
+                    />{" "}
+                    px
+                  </label>
+                </div>
 
+                <div className="ratio-buttons">
+                  <span>Resize proportionally:</span>
+                  <button
+                    onClick={() => handleRatioClick(2)}
+                    disabled={isProcessing}
+                  >
+                    {" "}
+                    / 2{" "}
+                  </button>
+                  <button
+                    onClick={() => handleRatioClick(4)}
+                    disabled={isProcessing}
+                  >
+                    {" "}
+                    / 4{" "}
+                  </button>
+                  <button
+                    onClick={() => handleRatioClick(6)}
+                    disabled={isProcessing}
+                  >
+                    {" "}
+                    / 6{" "}
+                  </button>
+                </div>
+                <p className="info-text">
+                  Note: If target aspect ratio differs, image will be centered
+                  with a blurred background fill.
+                </p>
+              </>
+            )}
+            {/* --- End Dimension Controls --- */}
+
+            {/* --- Quality Slider: Always show if images are loaded --- */}
             <div className="quality-slider">
-              <label htmlFor="quality">AVIF Quality: {quality}%</label>
+              <label htmlFor="quality">
+                AVIF Quality: {quality}% (Lower = Smaller File)
+              </label>
               <input
                 type="range"
                 id="quality"
-                min="0" // 0 = Max compression, Lowest quality
-                max="100" // 100 = Min compression, Highest quality
+                min="0"
+                max="100"
                 value={quality}
                 onChange={handleQualityChange}
                 disabled={isProcessing}
@@ -382,40 +492,28 @@ function App() {
                 <span>Higher Quality</span>
               </div>
             </div>
+            {/* --- End Quality Slider --- */}
 
             <button
               className="download-button"
               onClick={handleDownload}
               disabled={
                 isProcessing ||
-                !inputFile ||
-                !targetWidth ||
-                !targetHeight ||
-                targetWidth <= 0 ||
-                targetHeight <= 0
+                inputFiles.length === 0 ||
+                loadedImages.length !== inputFiles.length || // Check if all selected files are loaded
+                (showDimensionControls &&
+                  (!targetWidth ||
+                    !targetHeight ||
+                    targetWidth <= 0 ||
+                    targetHeight <= 0)) // Dimension check only for single mode
               }
             >
-              {isProcessing ? "Processing..." : "3. Download AVIF"}
+              {isProcessing
+                ? "Processing..."
+                : `3. Download AVIF (${inputFiles.length})`}
             </button>
-          </div>
-
-          <div className="preview">
-            <h2>Preview</h2>
-            <p>(Shows the original uploaded image)</p>
-            {/* Use the imageUrl state which holds the Data URL or Object URL */}
-            <img
-              src={imageUrl}
-              alt="Upload preview"
-              style={{
-                maxWidth: "100%",
-                maxHeight: "400px",
-                display: "block",
-                objectFit: "contain",
-              }}
-              onError={() => setError("Preview failed to load.")} // Handle potential image loading error
-            />
-          </div>
-        </div>
+          </div>{" "}
+        </div> // End controls-and-preview
       )}
 
       {/* Hidden canvas used for processing the image */}

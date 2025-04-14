@@ -360,3 +360,27 @@ button:disabled {
     align-items: flex-start;
   }
 }
+
+.preview-image-list {
+  max-height: 500px; /* Adjust as needed */
+  overflow-y: auto; /* Enable vertical scrolling */
+  width: 100%; /* Ensure it takes full width */
+  padding-right: 10px; /* Space for scrollbar */
+  box-sizing: border-box;
+}
+
+/* Style scrollbar for webkit browsers */
+.preview-image-list::-webkit-scrollbar {
+  width: 8px;
+}
+
+.preview-image-list::-webkit-scrollbar-track {
+  background: var(--input-bg);
+  border-radius: 4px;
+}
+
+.preview-image-list::-webkit-scrollbar-thumb {
+  background-color: var(--primary-color);
+  border-radius: 4px;
+  border: 2px solid var(--input-bg);
+}
